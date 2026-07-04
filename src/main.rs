@@ -1,71 +1,36 @@
-use std::env;
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process;
 
-struct InspectArgs {
-    pid: u32,
-    path: String,
+#[derive(Parser)]
+#[command(name = "psight", about = "explain what a path means for a given process")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// show what PATH means for a process
+    Inspect {
+        /// host process id
+        #[arg(short = 'p', long = "pid", value_name = "PID")]
+        pid: u32,
+        /// path as seen by that process
+        path: PathBuf,
+    },
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    match parse_inspect(&args) {
-        Ok(a) => {
-            println!("pid  {}", a.pid);
-            println!("path {}", a.path);
-        }
-        Err(msg) => {
-            eprintln!("psight: {msg}");
-            process::exit(1);
-        }
-    }
-}
-
-fn parse_inspect(args: &[String]) -> Result<InspectArgs, String> {
-    if args.is_empty() {
-        return Err("expected command: inspect".into());
-    }
-
-    if args[0] != "inspect" {
-        return Err(format!("unknown command '{}'", args[0]));
-    }
-
-    let mut pid: Option<u32> = None;
-    let mut path: Option<String> = None;
-    let mut i = 1;
-
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--pid" || a == "-p" {
-            i += 1;
-            let Some(raw) = args.get(i) else {
-                return Err(format!("missing value for {a}"));
-            };
-            if pid.is_some() {
-                return Err("pid given more than once".into());
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Inspect { pid, path } => {
+            if pid == 0 {
+                eprintln!("psight: pid must be greater than 0");
+                process::exit(1);
             }
-            let Ok(n) = raw.parse::<u32>() else {
-                return Err(format!("invalid pid '{raw}'"));
-            };
-            if n == 0 {
-                return Err("pid must be greater than 0".into());
-            }
-            pid = Some(n);
-        } else if a.starts_with('-') {
-            return Err(format!("unknown flag '{a}'"));
-        } else if path.is_some() {
-            return Err(format!("unexpected argument '{a}'"));
-        } else {
-            path = Some(a.clone());
+            println!("pid  {pid}");
+            println!("path {}", path.display());
         }
-        i += 1;
     }
-
-    let Some(pid) = pid else {
-        return Err("missing --pid / -p".into());
-    };
-    let Some(path) = path else {
-        return Err("missing path".into());
-    };
-
-    Ok(InspectArgs { pid, path })
 }
