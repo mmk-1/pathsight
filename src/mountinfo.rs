@@ -83,3 +83,70 @@ fn unescape_mount_field(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bind_mount() {
+        // bind of a host file onto /etc/resolv.conf (root field is the bind source path)
+        let text = "892 821 8:2 /var/lib/docker/containers/abc/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/sda1 rw\n";
+        let mounts = parse_mountinfo(text).unwrap();
+        assert_eq!(
+            mounts,
+            vec![MountInfo {
+                id: 892,
+                parent: 821,
+                root: "/var/lib/docker/containers/abc/resolv.conf".into(),
+                target: "/etc/resolv.conf".into(),
+                fstype: "ext4".into(),
+                source: "/dev/sda1".into(),
+                options: "rw,relatime".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_overlay_mount() {
+        let text = "\
+915 821 0:92 / /data rw,relatime - overlay overlay rw,lowerdir=/usr/lib/myapp,upperdir=/var/lib/containers/diff,workdir=/var/lib/containers/work
+";
+        let mounts = parse_mountinfo(text).unwrap();
+        assert_eq!(
+            mounts,
+            vec![MountInfo {
+                id: 915,
+                parent: 821,
+                root: "/".into(),
+                target: "/data".into(),
+                fstype: "overlay".into(),
+                source: "overlay".into(),
+                options: "rw,relatime".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_bind_and_overlay_dump() {
+        let text = "\
+36 35 98:0 / / rw,relatime shared:1 - ext4 /dev/root rw,errors=continue
+892 36 8:2 /host/config.yaml /app/config.yaml rw,relatime - ext4 /dev/sda1 rw
+915 36 0:92 / /data rw,relatime - overlay overlay rw,lowerdir=/lower,upperdir=/upper,workdir=/work
+";
+        let mounts = parse_mountinfo(text).unwrap();
+        assert_eq!(mounts.len(), 3);
+        assert_eq!(mounts[1].target, "/app/config.yaml");
+        assert_eq!(mounts[1].root, "/host/config.yaml");
+        assert_eq!(mounts[2].fstype, "overlay");
+        assert_eq!(mounts[2].target, "/data");
+    }
+
+    #[test]
+    fn unescape_space_in_path() {
+        let text = "10 1 8:1 /foo\\040bar /mnt/foo\\040bar rw - ext4 /dev/sda1 rw\n";
+        let mounts = parse_mountinfo(text).unwrap();
+        assert_eq!(mounts[0].root, "/foo bar");
+        assert_eq!(mounts[0].target, "/mnt/foo bar");
+    }
+}
