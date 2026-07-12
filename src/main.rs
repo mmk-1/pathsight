@@ -24,6 +24,19 @@ enum Commands {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Creds {
+    uid: [u32; 4],
+    gid: [u32; 4],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IdMapEntry {
+    first: u32,
+    lower_first: u32,
+    count: u32,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -46,6 +59,9 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     let cwd = read_proc_link(pid, "cwd")?;
     let ns_mnt = read_proc_link(pid, "ns/mnt")?;
     let ns_user = read_proc_link(pid, "ns/user")?;
+    let creds = parse_status_ids(&read_proc_file(pid, "status")?)?;
+    let uid_map = parse_id_map(&read_proc_file(pid, "uid_map")?)?;
+    let gid_map = parse_id_map(&read_proc_file(pid, "gid_map")?)?;
 
     // keep the root fd open for later path walks
     let _root = root_file;
@@ -56,6 +72,16 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     println!("cwd     {}", cwd.display());
     println!("ns.mnt  {}", ns_mnt.display());
     println!("ns.user {}", ns_user.display());
+    println!(
+        "uid     r={} e={} s={} fs={}",
+        creds.uid[0], creds.uid[1], creds.uid[2], creds.uid[3]
+    );
+    println!(
+        "gid     r={} e={} s={} fs={}",
+        creds.gid[0], creds.gid[1], creds.gid[2], creds.gid[3]
+    );
+    print_id_map("uid.map", &uid_map);
+    print_id_map("gid.map", &gid_map);
     Ok(())
 }
 
@@ -103,5 +129,98 @@ fn read_proc_link(pid: u32, name: &str) -> Result<PathBuf, String> {
             Err(format!("permission denied reading {link}"))
         }
         Err(e) => Err(format!("cannot read {link}: {e}")),
+    }
+}
+
+fn read_proc_file(pid: u32, name: &str) -> Result<String, String> {
+    let path = format!("/proc/{pid}/{name}");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(format!("no such process {pid}"))
+        }
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(format!("permission denied reading {path}"))
+        }
+        Err(e) => Err(format!("cannot read {path}: {e}")),
+    }
+}
+
+fn parse_status_ids(text: &str) -> Result<Creds, String> {
+    let mut uid = None;
+    let mut gid = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            uid = Some(parse_status_id_line("Uid", rest)?);
+        } else if let Some(rest) = line.strip_prefix("Gid:") {
+            gid = Some(parse_status_id_line("Gid", rest)?);
+        }
+    }
+
+    match (uid, gid) {
+        (Some(uid), Some(gid)) => Ok(Creds { uid, gid }),
+        (None, _) => Err("status missing Uid line".into()),
+        (_, None) => Err("status missing Gid line".into()),
+    }
+}
+
+fn parse_status_id_line(label: &str, rest: &str) -> Result<[u32; 4], String> {
+    let nums: Vec<&str> = rest.split_whitespace().collect();
+    if nums.len() != 4 {
+        return Err(format!("{label} line needs 4 fields, got {}", nums.len()));
+    }
+    let mut out = [0u32; 4];
+    for (i, s) in nums.iter().enumerate() {
+        out[i] = s
+            .parse()
+            .map_err(|_| format!("bad {label} value `{s}`"))?;
+    }
+    Ok(out)
+}
+
+fn parse_id_map(text: &str) -> Result<Vec<IdMapEntry>, String> {
+    let mut entries = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "id map line {}: expected 3 fields, got {}",
+                i + 1,
+                parts.len()
+            ));
+        }
+        let first = parts[0]
+            .parse()
+            .map_err(|_| format!("id map line {}: bad first id `{}`", i + 1, parts[0]))?;
+        let lower_first = parts[1]
+            .parse()
+            .map_err(|_| format!("id map line {}: bad lower id `{}`", i + 1, parts[1]))?;
+        let count = parts[2]
+            .parse()
+            .map_err(|_| format!("id map line {}: bad count `{}`", i + 1, parts[2]))?;
+        entries.push(IdMapEntry {
+            first,
+            lower_first,
+            count,
+        });
+    }
+    Ok(entries)
+}
+
+fn print_id_map(label: &str, entries: &[IdMapEntry]) {
+    if entries.is_empty() {
+        println!("{label} (empty)");
+        return;
+    }
+    for e in entries {
+        println!(
+            "{label} {} {} {}",
+            e.first, e.lower_first, e.count
+        );
     }
 }
