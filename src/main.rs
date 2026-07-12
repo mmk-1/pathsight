@@ -224,3 +224,71 @@ fn print_id_map(label: &str, entries: &[IdMapEntry]) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_identity_uid_map() {
+        let map = parse_id_map("         0          0 4294967295\n").unwrap();
+        assert_eq!(
+            map,
+            vec![IdMapEntry {
+                first: 0,
+                lower_first: 0,
+                count: 4294967295,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_rootless_uid_map() {
+        let fixture = "\
+         0     100000      65536
+     65536     165536      65536
+";
+        let map = parse_id_map(fixture).unwrap();
+        assert_eq!(
+            map,
+            vec![
+                IdMapEntry {
+                    first: 0,
+                    lower_first: 100000,
+                    count: 65536,
+                },
+                IdMapEntry {
+                    first: 65536,
+                    lower_first: 165536,
+                    count: 65536,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_empty_uid_map() {
+        assert_eq!(parse_id_map("").unwrap(), vec![]);
+        assert_eq!(parse_id_map("\n\n").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_id_map_rejects_bad_line() {
+        assert!(parse_id_map("0 0\n").is_err());
+        assert!(parse_id_map("0 x 1\n").is_err());
+    }
+
+    #[test]
+    fn parse_status_uid_gid() {
+        let fixture = "\
+Name:\tpsight
+Umask:\t0022
+State:\tR (running)
+Uid:\t1000\t1000\t1000\t1000
+Gid:\t100\t100\t100\t100
+";
+        let creds = parse_status_ids(fixture).unwrap();
+        assert_eq!(creds.uid, [1000, 1000, 1000, 1000]);
+        assert_eq!(creds.gid, [100, 100, 100, 100]);
+    }
+}
