@@ -1,7 +1,9 @@
 mod mountinfo;
+mod resolve;
 
 use clap::{Parser, Subcommand};
 use mountinfo::parse_mountinfo;
+use resolve::resolve_absolute;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -66,6 +68,7 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     let uid_map = parse_id_map(&read_proc_file(pid, "uid_map")?)?;
     let gid_map = parse_id_map(&read_proc_file(pid, "gid_map")?)?;
     let mounts = parse_mountinfo(&read_proc_file(pid, "mountinfo")?)?;
+    let resolved = resolve_absolute(&root_file, path)?;
 
     // keep the root fd open for later path walks
     let _root = root_file;
@@ -87,6 +90,10 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     print_id_map("uid.map", &uid_map);
     print_id_map("gid.map", &gid_map);
     println!("mounts  {}", mounts.len());
+    println!(
+        "inode   {}  dev {}:{}",
+        resolved.inode, resolved.dev_major, resolved.dev_minor
+    );
     Ok(())
 }
 
