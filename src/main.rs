@@ -3,7 +3,7 @@ mod resolve;
 
 use clap::{Parser, Subcommand};
 use mountinfo::parse_mountinfo;
-use resolve::resolve_absolute;
+use resolve::resolve_path;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -61,6 +61,7 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
 
     let _proc = open_proc(pid)?;
     let (root_file, root_path) = open_proc_root(pid)?;
+    let cwd_file = open_proc_cwd(pid)?;
     let cwd = read_proc_link(pid, "cwd")?;
     let ns_mnt = read_proc_link(pid, "ns/mnt")?;
     let ns_user = read_proc_link(pid, "ns/user")?;
@@ -68,10 +69,11 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     let uid_map = parse_id_map(&read_proc_file(pid, "uid_map")?)?;
     let gid_map = parse_id_map(&read_proc_file(pid, "gid_map")?)?;
     let mounts = parse_mountinfo(&read_proc_file(pid, "mountinfo")?)?;
-    let resolved = resolve_absolute(&root_file, path)?;
+    let resolved = resolve_path(&root_file, &cwd_file, path)?;
 
-    // keep the root fd open for later path walks
+    // keep root/cwd fds open for later path walks
     let _root = root_file;
+    let _cwd = cwd_file;
 
     println!("pid     {pid}");
     println!("path    {}", path.display());
@@ -128,6 +130,19 @@ fn open_proc_root(pid: u32) -> Result<(File, PathBuf), String> {
     })?;
 
     Ok((file, path))
+}
+
+fn open_proc_cwd(pid: u32) -> Result<File, String> {
+    match File::open(format!("/proc/{pid}/cwd")) {
+        Ok(f) => Ok(f),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(format!("no such process {pid}"))
+        }
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(format!("permission denied reading /proc/{pid}/cwd"))
+        }
+        Err(e) => Err(format!("cannot open /proc/{pid}/cwd: {e}")),
+    }
 }
 
 fn read_proc_link(pid: u32, name: &str) -> Result<PathBuf, String> {
