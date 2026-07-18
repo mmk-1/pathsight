@@ -1,9 +1,9 @@
 mod mountinfo;
-mod resolve;
+mod path_resolution;
 
 use clap::{Parser, Subcommand};
 use mountinfo::parse_mountinfo;
-use resolve::resolve_path;
+use path_resolution::resolve_path;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
