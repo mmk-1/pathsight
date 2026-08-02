@@ -26,6 +26,10 @@ pub fn parse_mountinfo(text: &str) -> Result<Vec<MountInfo>, String> {
     Ok(mounts)
 }
 
+pub fn find_mount(mounts: &[MountInfo], id: u64) -> Option<&MountInfo> {
+    mounts.iter().find(|m| u64::from(m.id) == id)
+}
+
 fn parse_mountinfo_line(line: &str) -> Result<MountInfo, String> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let sep = fields

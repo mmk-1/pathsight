@@ -7,6 +7,7 @@ pub struct ResolvedPath {
     pub inode: u64,
     pub dev_major: u32,
     pub dev_minor: u32,
+    pub mount_id: u64,
 }
 
 pub fn resolve_path(
@@ -58,18 +59,22 @@ fn statx_path_fd(fd: &OwnedFd) -> Result<ResolvedPath, String> {
             fd.as_raw_fd(),
             c"".as_ptr(),
             libc::AT_EMPTY_PATH,
-            libc::STATX_INO,
+            libc::STATX_INO | libc::STATX_MNT_ID,
             &mut buf,
         )
     };
     if rc < 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
+    if buf.stx_mask & libc::STATX_MNT_ID == 0 {
+        return Err("kernel did not return mount id (need Linux 5.8+)".into());
+    }
 
     Ok(ResolvedPath {
         inode: buf.stx_ino,
         dev_major: buf.stx_dev_major,
         dev_minor: buf.stx_dev_minor,
+        mount_id: buf.stx_mnt_id,
     })
 }
 

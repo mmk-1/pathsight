@@ -2,7 +2,7 @@ mod mountinfo;
 mod path_resolution;
 
 use clap::{Parser, Subcommand};
-use mountinfo::parse_mountinfo;
+use mountinfo::{find_mount, parse_mountinfo};
 use path_resolution::resolve_path;
 use std::fs::File;
 use std::io;
@@ -70,6 +70,12 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     let gid_map = parse_id_map(&read_proc_file(pid, "gid_map")?)?;
     let mounts = parse_mountinfo(&read_proc_file(pid, "mountinfo")?)?;
     let resolved = resolve_path(&root_file, &cwd_file, path)?;
+    let covering = find_mount(&mounts, resolved.mount_id).ok_or_else(|| {
+        format!(
+            "mount id {} from path not found in mountinfo (mounts may have changed)",
+            resolved.mount_id
+        )
+    })?;
 
     // keep root/cwd fds open for later path walks
     let _root = root_file;
@@ -95,6 +101,10 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     println!(
         "inode   {}  dev {}:{}",
         resolved.inode, resolved.dev_major, resolved.dev_minor
+    );
+    println!(
+        "mount   id={}  {}  {}",
+        covering.id, covering.fstype, covering.target
     );
     Ok(())
 }
