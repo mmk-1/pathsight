@@ -106,6 +106,8 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
         "mount   id={}  {}  {}",
         covering.id, covering.fstype, covering.target
     );
+    println!("        bind   {}", covering.root);
+    println!("        flags  {}", covering.options);
     Ok(())
 }
 
