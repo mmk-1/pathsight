@@ -2,7 +2,7 @@ mod mountinfo;
 mod path_resolution;
 
 use clap::{Parser, Subcommand};
-use mountinfo::{find_mount, parse_mountinfo};
+use mountinfo::{find_mount, parse_mountinfo, parse_overlay_dirs};
 use path_resolution::resolve_path;
 use std::fs::File;
 use std::io;
@@ -108,6 +108,20 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
     );
     println!("        bind   {}", covering.root);
     println!("        flags  {}", covering.options);
+    if covering.fstype == "overlay" {
+        let dirs = parse_overlay_dirs(&covering.super_options);
+        if let Some(lower) = &dirs.lowerdir {
+            println!("        lower  {lower}");
+        }
+        if let Some(upper) = &dirs.upperdir {
+            println!("        upper  {upper}");
+        }
+        if let Some(work) = &dirs.workdir {
+            println!("        work   {work}");
+        }
+        // xattrs would be needed to prove which layer a file is on
+        println!("        layer  cannot prove upper vs lower");
+    }
     Ok(())
 }
 

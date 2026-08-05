@@ -9,6 +9,30 @@ pub struct MountInfo {
     pub fstype: String,
     pub source: String,
     pub options: String,
+    pub super_options: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OverlayDirs {
+    pub lowerdir: Option<String>,
+    pub upperdir: Option<String>,
+    pub workdir: Option<String>,
+}
+
+/// lowerdir/upperdir/workdir live in super options (after '-'), not vfs options.
+pub fn parse_overlay_dirs(super_options: &str) -> OverlayDirs {
+    let mut dirs = OverlayDirs::default();
+    for part in super_options.split(',') {
+        let part = unescape_mount_field(part);
+        if let Some(v) = part.strip_prefix("lowerdir=") {
+            dirs.lowerdir = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("upperdir=") {
+            dirs.upperdir = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("workdir=") {
+            dirs.workdir = Some(v.to_string());
+        }
+    }
+    dirs
 }
 
 pub fn parse_mountinfo(text: &str) -> Result<Vec<MountInfo>, String> {
@@ -60,7 +84,7 @@ fn parse_mountinfo_line(line: &str) -> Result<MountInfo, String> {
         options: fields[5].to_string(),
         fstype: fields[sep + 1].to_string(),
         source: unescape_mount_field(fields[sep + 2]),
-        // super options (fields[sep + 3]) ignored for now
+        super_options: fields[sep + 3].to_string(),
     })
 }
 
@@ -107,6 +131,7 @@ mod tests {
                 fstype: "ext4".into(),
                 source: "/dev/sda1".into(),
                 options: "rw,relatime".into(),
+                super_options: "rw".into(),
             }]
         );
     }
@@ -127,6 +152,9 @@ mod tests {
                 fstype: "overlay".into(),
                 source: "overlay".into(),
                 options: "rw,relatime".into(),
+                super_options:
+                    "rw,lowerdir=/usr/lib/myapp,upperdir=/var/lib/containers/diff,workdir=/var/lib/containers/work"
+                        .into(),
             }]
         );
     }
