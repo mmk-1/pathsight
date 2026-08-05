@@ -181,4 +181,60 @@ mod tests {
         assert_eq!(mounts[0].root, "/foo bar");
         assert_eq!(mounts[0].target, "/mnt/foo bar");
     }
+
+    #[test]
+    fn parse_overlay_dirs_basic() {
+        let dirs = parse_overlay_dirs(
+            "rw,lowerdir=/lower,upperdir=/upper,workdir=/work,index=off",
+        );
+        assert_eq!(
+            dirs,
+            OverlayDirs {
+                lowerdir: Some("/lower".into()),
+                upperdir: Some("/upper".into()),
+                workdir: Some("/work".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_overlay_dirs_stacked_lower() {
+        let dirs = parse_overlay_dirs(
+            "lowerdir=/a:/b:/c,upperdir=/u,workdir=/w",
+        );
+        assert_eq!(dirs.lowerdir.as_deref(), Some("/a:/b:/c"));
+        assert_eq!(dirs.upperdir.as_deref(), Some("/u"));
+        assert_eq!(dirs.workdir.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn parse_overlay_dirs_unescapes_comma_in_path() {
+        // mountinfo stores comma in a path as \054
+        let dirs = parse_overlay_dirs("lowerdir=/data\\054dir,upperdir=/up,workdir=/wk");
+        assert_eq!(dirs.lowerdir.as_deref(), Some("/data,dir"));
+    }
+
+    #[test]
+    fn parse_overlay_dirs_from_mountinfo_line() {
+        let text = "\
+915 821 0:92 / /data rw,relatime - overlay overlay rw,lowerdir=/usr/lib/myapp,upperdir=/var/lib/containers/diff,workdir=/var/lib/containers/work
+";
+        let mounts = parse_mountinfo(text).unwrap();
+        let dirs = parse_overlay_dirs(&mounts[0].super_options);
+        assert_eq!(dirs.lowerdir.as_deref(), Some("/usr/lib/myapp"));
+        assert_eq!(
+            dirs.upperdir.as_deref(),
+            Some("/var/lib/containers/diff")
+        );
+        assert_eq!(
+            dirs.workdir.as_deref(),
+            Some("/var/lib/containers/work")
+        );
+    }
+
+    #[test]
+    fn parse_overlay_dirs_empty_when_absent() {
+        assert_eq!(parse_overlay_dirs("rw,relatime"), OverlayDirs::default());
+        assert_eq!(parse_overlay_dirs(""), OverlayDirs::default());
+    }
 }
