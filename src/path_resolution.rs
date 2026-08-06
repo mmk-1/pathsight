@@ -8,6 +8,8 @@ pub struct ResolvedPath {
     pub dev_major: u32,
     pub dev_minor: u32,
     pub mount_id: u64,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 pub fn resolve_path(
@@ -54,12 +56,13 @@ fn open_how(dir: &impl AsRawFd, path: &Path, resolve: u64) -> Result<ResolvedPat
 
 fn statx_path_fd(fd: &OwnedFd) -> Result<ResolvedPath, String> {
     let mut buf: libc::statx = unsafe { std::mem::zeroed() };
+    let want = libc::STATX_INO | libc::STATX_MNT_ID | libc::STATX_UID | libc::STATX_GID;
     let rc = unsafe {
         libc::statx(
             fd.as_raw_fd(),
             c"".as_ptr(),
             libc::AT_EMPTY_PATH,
-            libc::STATX_INO | libc::STATX_MNT_ID,
+            want,
             &mut buf,
         )
     };
@@ -69,12 +72,17 @@ fn statx_path_fd(fd: &OwnedFd) -> Result<ResolvedPath, String> {
     if buf.stx_mask & libc::STATX_MNT_ID == 0 {
         return Err("kernel did not return mount id (need Linux 5.8+)".into());
     }
+    if buf.stx_mask & libc::STATX_UID == 0 || buf.stx_mask & libc::STATX_GID == 0 {
+        return Err("kernel did not return file uid/gid".into());
+    }
 
     Ok(ResolvedPath {
         inode: buf.stx_ino,
         dev_major: buf.stx_dev_major,
         dev_minor: buf.stx_dev_minor,
         mount_id: buf.stx_mnt_id,
+        uid: buf.stx_uid,
+        gid: buf.stx_gid,
     })
 }
 

@@ -102,6 +102,12 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
         "inode   {}  dev {}:{}",
         resolved.inode, resolved.dev_major, resolved.dev_minor
     );
+    println!("disk    uid={} gid={}", resolved.uid, resolved.gid);
+    println!(
+        "mapped  uid={} gid={}",
+        format_mapped_id(map_id_into_ns(&uid_map, resolved.uid)),
+        format_mapped_id(map_id_into_ns(&gid_map, resolved.gid))
+    );
     println!(
         "mount   id={}  {}  {}",
         covering.id, covering.fstype, covering.target
@@ -278,6 +284,28 @@ fn print_id_map(label: &str, entries: &[IdMapEntry]) {
     }
 }
 
+// map a host/parent-ns id into the process user namespace via uid_map/gid_map
+fn map_id_into_ns(map: &[IdMapEntry], id: u32) -> Option<u32> {
+    for e in map {
+        let start = u64::from(e.lower_first);
+        let Some(end) = start.checked_add(u64::from(e.count)) else {
+            continue;
+        };
+        let id = u64::from(id);
+        if id >= start && id < end {
+            return Some(e.first + (id as u32 - e.lower_first));
+        }
+    }
+    None
+}
+
+fn format_mapped_id(id: Option<u32>) -> String {
+    match id {
+        Some(id) => id.to_string(),
+        None => "unmapped".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +371,21 @@ Gid:\t100\t100\t100\t100
         let creds = parse_status_ids(fixture).unwrap();
         assert_eq!(creds.uid, [1000, 1000, 1000, 1000]);
         assert_eq!(creds.gid, [100, 100, 100, 100]);
+    }
+
+    #[test]
+    fn map_id_into_ns_identity() {
+        let map = parse_id_map("0 0 4294967295\n").unwrap();
+        assert_eq!(map_id_into_ns(&map, 0), Some(0));
+        assert_eq!(map_id_into_ns(&map, 1000), Some(1000));
+    }
+
+    #[test]
+    fn map_id_into_ns_rootless() {
+        let map = parse_id_map("0 100000 65536\n").unwrap();
+        assert_eq!(map_id_into_ns(&map, 100000), Some(0));
+        assert_eq!(map_id_into_ns(&map, 100001), Some(1));
+        assert_eq!(map_id_into_ns(&map, 99999), None);
+        assert_eq!(map_id_into_ns(&map, 165536), None);
     }
 }
