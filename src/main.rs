@@ -1,9 +1,11 @@
 mod mountinfo;
 mod path_resolution;
+mod report;
 
 use clap::{Parser, Subcommand};
 use mountinfo::{find_mount, parse_mountinfo, parse_overlay_dirs};
 use path_resolution::resolve_path;
+use report::{format_inspect_text, InspectResult, MapEntry, OverlayInfo};
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -35,13 +37,6 @@ struct Creds {
     gid: [u32; 4],
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct IdMapEntry {
-    first: u32,
-    lower_first: u32,
-    count: u32,
-}
-
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -55,6 +50,12 @@ fn main() {
 }
 
 fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
+    let result = inspect(pid, path)?;
+    print!("{}", format_inspect_text(&result));
+    Ok(())
+}
+
+fn inspect(pid: u32, path: &Path) -> Result<InspectResult, String> {
     if pid == 0 {
         return Err("pid must be greater than 0".into());
     }
@@ -77,58 +78,49 @@ fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
         )
     })?;
 
-    // keep root/cwd fds open for later path walks
+    // keep root/cwd fds open until resolve finishes
     let _root = root_file;
     let _cwd = cwd_file;
 
-    println!("pid     {pid}");
-    println!("path    {}", path.display());
-    println!("root    {}", root_path.display());
-    println!("cwd     {}", cwd.display());
-    println!("ns.mnt  {}", ns_mnt.display());
-    println!("ns.user {}", ns_user.display());
-    println!(
-        "uid     r={} e={} s={} fs={}",
-        creds.uid[0], creds.uid[1], creds.uid[2], creds.uid[3]
-    );
-    println!(
-        "gid     r={} e={} s={} fs={}",
-        creds.gid[0], creds.gid[1], creds.gid[2], creds.gid[3]
-    );
-    print_id_map("uid.map", &uid_map);
-    print_id_map("gid.map", &gid_map);
-    println!("mounts  {}", mounts.len());
-    println!(
-        "inode   {}  dev {}:{}",
-        resolved.inode, resolved.dev_major, resolved.dev_minor
-    );
-    println!("disk    uid={} gid={}", resolved.uid, resolved.gid);
-    println!(
-        "mapped  uid={} gid={}",
-        format_mapped_id(map_id_into_ns(&uid_map, resolved.uid)),
-        format_mapped_id(map_id_into_ns(&gid_map, resolved.gid))
-    );
-    println!(
-        "mount   id={}  {}  {}",
-        covering.id, covering.fstype, covering.target
-    );
-    println!("        bind   {}", covering.root);
-    println!("        flags  {}", covering.options);
-    if covering.fstype == "overlay" {
+    let overlay = if covering.fstype == "overlay" {
         let dirs = parse_overlay_dirs(&covering.super_options);
-        if let Some(lower) = &dirs.lowerdir {
-            println!("        lower  {lower}");
-        }
-        if let Some(upper) = &dirs.upperdir {
-            println!("        upper  {upper}");
-        }
-        if let Some(work) = &dirs.workdir {
-            println!("        work   {work}");
-        }
-        // xattrs would be needed to prove which layer a file is on
-        println!("        layer  cannot prove upper vs lower");
-    }
-    Ok(())
+        Some(OverlayInfo {
+            lowerdir: dirs.lowerdir,
+            upperdir: dirs.upperdir,
+            workdir: dirs.workdir,
+        })
+    } else {
+        None
+    };
+
+    let mapped_uid = map_id_into_ns(&uid_map, resolved.uid);
+    let mapped_gid = map_id_into_ns(&gid_map, resolved.gid);
+
+    Ok(InspectResult {
+        pid,
+        path: path.to_path_buf(),
+        root: root_path,
+        cwd,
+        ns_mnt,
+        ns_user,
+        uid: creds.uid,
+        gid: creds.gid,
+        uid_map,
+        gid_map,
+        inode: resolved.inode,
+        dev_major: resolved.dev_major,
+        dev_minor: resolved.dev_minor,
+        disk_uid: resolved.uid,
+        disk_gid: resolved.gid,
+        mapped_uid,
+        mapped_gid,
+        mount_id: covering.id,
+        mount_fstype: covering.fstype.clone(),
+        mount_target: covering.target.clone(),
+        mount_bind: covering.root.clone(),
+        mount_flags: covering.options.clone(),
+        overlay,
+    })
 }
 
 fn open_proc(pid: u32) -> Result<File, String> {
@@ -238,7 +230,7 @@ fn parse_status_id_line(label: &str, rest: &str) -> Result<[u32; 4], String> {
     Ok(out)
 }
 
-fn parse_id_map(text: &str) -> Result<Vec<IdMapEntry>, String> {
+fn parse_id_map(text: &str) -> Result<Vec<MapEntry>, String> {
     let mut entries = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -262,7 +254,7 @@ fn parse_id_map(text: &str) -> Result<Vec<IdMapEntry>, String> {
         let count = parts[2]
             .parse()
             .map_err(|_| format!("id map line {}: bad count `{}`", i + 1, parts[2]))?;
-        entries.push(IdMapEntry {
+        entries.push(MapEntry {
             first,
             lower_first,
             count,
@@ -271,21 +263,8 @@ fn parse_id_map(text: &str) -> Result<Vec<IdMapEntry>, String> {
     Ok(entries)
 }
 
-fn print_id_map(label: &str, entries: &[IdMapEntry]) {
-    if entries.is_empty() {
-        println!("{label} (empty)");
-        return;
-    }
-    for e in entries {
-        println!(
-            "{label} {} {} {}",
-            e.first, e.lower_first, e.count
-        );
-    }
-}
-
 // map a host/parent-ns id into the process user namespace via uid_map/gid_map
-fn map_id_into_ns(map: &[IdMapEntry], id: u32) -> Option<u32> {
+fn map_id_into_ns(map: &[MapEntry], id: u32) -> Option<u32> {
     for e in map {
         let start = u64::from(e.lower_first);
         let Some(end) = start.checked_add(u64::from(e.count)) else {
@@ -299,13 +278,6 @@ fn map_id_into_ns(map: &[IdMapEntry], id: u32) -> Option<u32> {
     None
 }
 
-fn format_mapped_id(id: Option<u32>) -> String {
-    match id {
-        Some(id) => id.to_string(),
-        None => "unmapped".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +287,7 @@ mod tests {
         let map = parse_id_map("         0          0 4294967295\n").unwrap();
         assert_eq!(
             map,
-            vec![IdMapEntry {
+            vec![MapEntry {
                 first: 0,
                 lower_first: 0,
                 count: 4294967295,
@@ -333,12 +305,12 @@ mod tests {
         assert_eq!(
             map,
             vec![
-                IdMapEntry {
+                MapEntry {
                     first: 0,
                     lower_first: 100000,
                     count: 65536,
                 },
-                IdMapEntry {
+                MapEntry {
                     first: 65536,
                     lower_first: 165536,
                     count: 65536,
