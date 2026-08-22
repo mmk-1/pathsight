@@ -4,8 +4,10 @@ mod report;
 
 use clap::{Parser, Subcommand};
 use mountinfo::{find_mount, parse_mountinfo, parse_overlay_dirs};
-use path_resolution::resolve_path;
-use report::{format_inspect_text, InspectResult, MapEntry, OverlayInfo};
+use path_resolution::{resolve_path, ResolveError};
+use report::{
+    format_inspect_text, InspectResult, MapEntry, OverlayInfo, PathDetails, PathOutcome,
+};
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -70,7 +72,28 @@ fn inspect(pid: u32, path: &Path) -> Result<InspectResult, String> {
     let uid_map = parse_id_map(&read_proc_file(pid, "uid_map")?)?;
     let gid_map = parse_id_map(&read_proc_file(pid, "gid_map")?)?;
     let mounts = parse_mountinfo(&read_proc_file(pid, "mountinfo")?)?;
-    let resolved = resolve_path(&root_file, &cwd_file, path)?;
+
+    let base = |outcome: PathOutcome| InspectResult {
+        pid,
+        path: path.to_path_buf(),
+        root: root_path.clone(),
+        cwd: cwd.clone(),
+        ns_mnt: ns_mnt.clone(),
+        ns_user: ns_user.clone(),
+        uid: creds.uid,
+        gid: creds.gid,
+        uid_map: uid_map.clone(),
+        gid_map: gid_map.clone(),
+        outcome,
+    };
+
+    let resolved = match resolve_path(&root_file, &cwd_file, path) {
+        Ok(r) => r,
+        Err(ResolveError::Missing) => return Ok(base(PathOutcome::Missing)),
+        Err(ResolveError::AccessDenied) => return Ok(base(PathOutcome::AccessDenied)),
+        Err(ResolveError::Other(msg)) => return Err(msg),
+    };
+
     let covering = find_mount(&mounts, resolved.mount_id).ok_or_else(|| {
         format!(
             "mount id {} from path not found in mountinfo (mounts may have changed)",
@@ -96,17 +119,7 @@ fn inspect(pid: u32, path: &Path) -> Result<InspectResult, String> {
     let mapped_uid = map_id_into_ns(&uid_map, resolved.uid);
     let mapped_gid = map_id_into_ns(&gid_map, resolved.gid);
 
-    Ok(InspectResult {
-        pid,
-        path: path.to_path_buf(),
-        root: root_path,
-        cwd,
-        ns_mnt,
-        ns_user,
-        uid: creds.uid,
-        gid: creds.gid,
-        uid_map,
-        gid_map,
+    Ok(base(PathOutcome::Resolved(PathDetails {
         inode: resolved.inode,
         dev_major: resolved.dev_major,
         dev_minor: resolved.dev_minor,
@@ -120,7 +133,7 @@ fn inspect(pid: u32, path: &Path) -> Result<InspectResult, String> {
         mount_bind: covering.root.clone(),
         mount_flags: covering.options.clone(),
         overlay,
-    })
+    })))
 }
 
 fn open_proc(pid: u32) -> Result<File, String> {

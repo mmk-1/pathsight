@@ -12,11 +12,20 @@ pub struct ResolvedPath {
     pub gid: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// path does not exist in that process's view (ENOENT)
+    Missing,
+    /// cannot open the path (EACCES / EPERM)
+    AccessDenied,
+    Other(String),
+}
+
 pub fn resolve_path(
     root: &impl AsRawFd,
     cwd: &impl AsRawFd,
     path: &Path,
-) -> Result<ResolvedPath, String> {
+) -> Result<ResolvedPath, ResolveError> {
     if path.is_absolute() {
         open_how(
             root,
@@ -28,9 +37,12 @@ pub fn resolve_path(
     }
 }
 
-fn open_how(dir: &impl AsRawFd, path: &Path, resolve: u64) -> Result<ResolvedPath, String> {
+fn open_how(dir: &impl AsRawFd, path: &Path, resolve: u64) -> Result<ResolvedPath, ResolveError> {
     let c_path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
-        format!("path contains interior null byte: {}", path.display())
+        ResolveError::Other(format!(
+            "path contains interior null byte: {}",
+            path.display()
+        ))
     })?;
 
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
@@ -51,7 +63,9 @@ fn open_how(dir: &impl AsRawFd, path: &Path, resolve: u64) -> Result<ResolvedPat
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    statx_path_fd(&owned).map_err(|e| format!("cannot stat {}: {e}", path.display()))
+    statx_path_fd(&owned).map_err(|e| {
+        ResolveError::Other(format!("cannot stat {}: {e}", path.display()))
+    })
 }
 
 fn statx_path_fd(fd: &OwnedFd) -> Result<ResolvedPath, String> {
@@ -86,18 +100,20 @@ fn statx_path_fd(fd: &OwnedFd) -> Result<ResolvedPath, String> {
     })
 }
 
-fn map_open_error(path: &Path, err: std::io::Error) -> String {
+fn map_open_error(path: &Path, err: std::io::Error) -> ResolveError {
     let display = path.display();
     match err.raw_os_error() {
-        Some(libc::ENOENT) => format!("no such path {display}"),
-        Some(libc::EACCES) | Some(libc::EPERM) => {
-            format!("permission denied opening {display}")
+        Some(libc::ENOENT) => ResolveError::Missing,
+        Some(libc::EACCES) | Some(libc::EPERM) => ResolveError::AccessDenied,
+        Some(libc::ENOTDIR) => {
+            ResolveError::Other(format!("not a directory in path {display}"))
         }
-        Some(libc::ENOTDIR) => format!("not a directory in path {display}"),
-        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => {
-            "openat2 is not supported on this kernel (need Linux 5.6+)".into()
+        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => ResolveError::Other(
+            "openat2 is not supported on this kernel (need Linux 5.6+)".into(),
+        ),
+        Some(libc::ELOOP) => {
+            ResolveError::Other(format!("too many symlinks resolving {display}"))
         }
-        Some(libc::ELOOP) => format!("too many symlinks resolving {display}"),
-        _ => format!("cannot open {display}: {err}"),
+        _ => ResolveError::Other(format!("cannot open {display}: {err}")),
     }
 }

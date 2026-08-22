@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayInfo {
@@ -15,17 +15,7 @@ pub struct MapEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InspectResult {
-    pub pid: u32,
-    pub path: PathBuf,
-    pub root: PathBuf,
-    pub cwd: PathBuf,
-    pub ns_mnt: PathBuf,
-    pub ns_user: PathBuf,
-    pub uid: [u32; 4],
-    pub gid: [u32; 4],
-    pub uid_map: Vec<MapEntry>,
-    pub gid_map: Vec<MapEntry>,
+pub struct PathDetails {
     pub inode: u64,
     pub dev_major: u32,
     pub dev_minor: u32,
@@ -39,6 +29,30 @@ pub struct InspectResult {
     pub mount_bind: String,
     pub mount_flags: String,
     pub overlay: Option<OverlayInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathOutcome {
+    Resolved(PathDetails),
+    /// ENOENT — path does not exist in that process's view
+    Missing,
+    /// EACCES / EPERM — cannot open the path
+    AccessDenied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectResult {
+    pub pid: u32,
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub ns_mnt: PathBuf,
+    pub ns_user: PathBuf,
+    pub uid: [u32; 4],
+    pub gid: [u32; 4],
+    pub uid_map: Vec<MapEntry>,
+    pub gid_map: Vec<MapEntry>,
+    pub outcome: PathOutcome,
 }
 
 pub fn format_inspect_text(r: &InspectResult) -> String {
@@ -72,46 +86,104 @@ pub fn format_inspect_text(r: &InspectResult) -> String {
     push_id_map(&mut out, "gid.map", &r.gid_map);
     out.push('\n');
 
-    push_line(
-        &mut out,
-        "inode",
-        &format!("{}  dev {}:{}", r.inode, r.dev_major, r.dev_minor),
-    );
-    push_line(
-        &mut out,
-        "owner",
-        &format!(
-            "disk {}:{}  mapped {}:{}",
-            r.disk_uid,
-            r.disk_gid,
-            format_mapped_id(r.mapped_uid),
-            format_mapped_id(r.mapped_gid)
-        ),
-    );
-    push_line(
-        &mut out,
-        "mount",
-        &format!(
-            "id={}  {}  {}  {}",
-            r.mount_id, r.mount_fstype, r.mount_target, r.mount_flags
-        ),
-    );
-    push_indent(&mut out, "bind", &r.mount_bind);
+    match &r.outcome {
+        PathOutcome::Resolved(p) => {
+            push_line(
+                &mut out,
+                "inode",
+                &format!("{}  dev {}:{}", p.inode, p.dev_major, p.dev_minor),
+            );
+            push_line(
+                &mut out,
+                "owner",
+                &format!(
+                    "disk {}:{}  mapped {}:{}",
+                    p.disk_uid,
+                    p.disk_gid,
+                    format_mapped_id(p.mapped_uid),
+                    format_mapped_id(p.mapped_gid)
+                ),
+            );
+            push_line(
+                &mut out,
+                "mount",
+                &format!(
+                    "id={}  {}  {}  {}",
+                    p.mount_id, p.mount_fstype, p.mount_target, p.mount_flags
+                ),
+            );
+            push_indent(&mut out, "bind", &p.mount_bind);
 
-    if let Some(ov) = &r.overlay {
-        if let Some(lower) = &ov.lowerdir {
-            push_indent(&mut out, "lower", lower);
+            if let Some(ov) = &p.overlay {
+                if let Some(lower) = &ov.lowerdir {
+                    push_indent(&mut out, "lower", lower);
+                }
+                if let Some(upper) = &ov.upperdir {
+                    push_indent(&mut out, "upper", upper);
+                }
+                if let Some(work) = &ov.workdir {
+                    push_indent(&mut out, "work", work);
+                }
+            }
+
+            for msg in path_warnings(&r.path, p) {
+                push_line(&mut out, "warning", &msg);
+            }
         }
-        if let Some(upper) = &ov.upperdir {
-            push_indent(&mut out, "upper", upper);
+        PathOutcome::Missing => {
+            push_line(&mut out, "error", "path missing (ENOENT)");
         }
-        if let Some(work) = &ov.workdir {
-            push_indent(&mut out, "work", work);
+        PathOutcome::AccessDenied => {
+            push_line(&mut out, "error", "permission denied (EACCES)");
         }
-        push_indent(&mut out, "layer", "cannot prove upper vs lower");
     }
 
     out
+}
+
+pub fn path_warnings(path: &Path, p: &PathDetails) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if mount_has_option(&p.mount_flags, "ro") {
+        warnings.push("mount is read-only".into());
+    }
+
+    if path_is_mount_target(path, &p.mount_target) {
+        warnings.push("path is covered by a mount".into());
+    }
+
+    if p.mapped_uid.is_none() {
+        warnings.push("disk uid is unmapped in this user namespace".into());
+    }
+    if p.mapped_gid.is_none() {
+        warnings.push("disk gid is unmapped in this user namespace".into());
+    }
+
+    if p.overlay.is_some() {
+        warnings.push("cannot prove overlay upper vs lower".into());
+    }
+
+    warnings
+}
+
+fn mount_has_option(options: &str, name: &str) -> bool {
+    options.split(',').any(|opt| opt == name)
+}
+
+fn path_is_mount_target(path: &Path, mount_target: &str) -> bool {
+    norm_path(path) == norm_str(mount_target)
+}
+
+fn norm_path(path: &Path) -> String {
+    norm_str(&path.to_string_lossy()).to_string()
+}
+
+fn norm_str(s: &str) -> &str {
+    if s.len() > 1 {
+        s.trim_end_matches('/')
+    } else {
+        s
+    }
 }
 
 fn push_line(out: &mut String, key: &str, value: &str) {
@@ -148,7 +220,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn sample() -> InspectResult {
+    fn sample_context() -> InspectResult {
         InspectResult {
             pid: 4821,
             path: PathBuf::from("/data/config"),
@@ -168,6 +240,12 @@ mod tests {
                 lower_first: 100000,
                 count: 65536,
             }],
+            outcome: PathOutcome::Missing,
+        }
+    }
+
+    fn sample_details() -> PathDetails {
+        PathDetails {
             inode: 88421,
             dev_major: 0,
             dev_minor: 92,
@@ -188,6 +266,12 @@ mod tests {
         }
     }
 
+    fn sample() -> InspectResult {
+        let mut r = sample_context();
+        r.outcome = PathOutcome::Resolved(sample_details());
+        r
+    }
+
     #[test]
     fn text_layout_has_sections_and_owner() {
         let text = format_inspect_text(&sample());
@@ -197,9 +281,66 @@ mod tests {
         assert!(text.contains("owner   disk 100000:100000  mapped 0:0\n"));
         assert!(text.contains("mount   id=892  overlay  /data  rw,relatime\n"));
         assert!(text.contains("        lower /lower\n"));
-        assert!(text.contains("        layer cannot prove upper vs lower\n"));
+        assert!(text.contains("warning cannot prove overlay upper vs lower\n"));
+        assert!(!text.contains("        layer "));
         // blank line between process context and creds, and before inode block
         assert!(text.contains("ns.user user:[4026531837]\n\nuid"));
         assert!(text.contains("gid.map 0 100000 65536\n\ninode"));
+    }
+
+    #[test]
+    fn text_error_path_missing() {
+        let text = format_inspect_text(&sample_context());
+        assert!(text.contains("pid     4821\n"));
+        assert!(text.contains("path    /data/config\n"));
+        assert!(text.contains("error   path missing (ENOENT)\n"));
+        assert!(!text.contains("inode"));
+    }
+
+    #[test]
+    fn text_error_access_denied() {
+        let mut r = sample_context();
+        r.outcome = PathOutcome::AccessDenied;
+        let text = format_inspect_text(&r);
+        assert!(text.contains("error   permission denied (EACCES)\n"));
+        assert!(!text.contains("inode"));
+    }
+
+    #[test]
+    fn warnings_read_only() {
+        let mut p = sample_details();
+        p.mount_flags = "ro,relatime".into();
+        p.overlay = None;
+        let w = path_warnings(Path::new("/data/config"), &p);
+        assert!(w.iter().any(|m| m == "mount is read-only"));
+    }
+
+    #[test]
+    fn warnings_covering_mount() {
+        let mut p = sample_details();
+        p.mount_target = "/data/config".into();
+        p.overlay = None;
+        let w = path_warnings(Path::new("/data/config"), &p);
+        assert!(w.iter().any(|m| m == "path is covered by a mount"));
+    }
+
+    #[test]
+    fn warnings_uid_gid_unmapped() {
+        let mut p = sample_details();
+        p.mapped_uid = None;
+        p.mapped_gid = None;
+        p.overlay = None;
+        let w = path_warnings(Path::new("/data/config"), &p);
+        assert!(w.iter().any(|m| m == "disk uid is unmapped in this user namespace"));
+        assert!(w.iter().any(|m| m == "disk gid is unmapped in this user namespace"));
+    }
+
+    #[test]
+    fn warnings_ro_not_confused_with_substring() {
+        let mut p = sample_details();
+        p.mount_flags = "rw,errors=remount-ro".into();
+        p.overlay = None;
+        let w = path_warnings(Path::new("/data/config"), &p);
+        assert!(!w.iter().any(|m| m == "mount is read-only"));
     }
 }
