@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand};
 use mountinfo::{find_mount, parse_mountinfo, parse_overlay_dirs};
 use path_resolution::{resolve_path, ResolveError};
 use report::{
-    format_inspect_text, InspectResult, MapEntry, OverlayInfo, PathDetails, PathOutcome,
+    format_inspect_json, format_inspect_text, InspectResult, MapEntry, OverlayInfo,
+    PathDetails, PathOutcome,
 };
 use std::fs::File;
 use std::io;
@@ -30,6 +31,9 @@ enum Commands {
         pid: u32,
         /// path as seen by that process
         path: PathBuf,
+        /// json instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -42,8 +46,8 @@ struct Creds {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Inspect { pid, path } => {
-            if let Err(msg) = run_inspect(pid, &path) {
+        Commands::Inspect { pid, path, json } => {
+            if let Err(msg) = run_inspect(pid, &path, json) {
                 eprintln!("psight: {msg}");
                 process::exit(1);
             }
@@ -51,9 +55,13 @@ fn main() {
     }
 }
 
-fn run_inspect(pid: u32, path: &Path) -> Result<(), String> {
+fn run_inspect(pid: u32, path: &Path, json: bool) -> Result<(), String> {
     let result = inspect(pid, path)?;
-    print!("{}", format_inspect_text(&result));
+    if json {
+        println!("{}", format_inspect_json(&result));
+    } else {
+        print!("{}", format_inspect_text(&result));
+    }
     Ok(())
 }
 

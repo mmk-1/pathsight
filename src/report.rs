@@ -1,4 +1,8 @@
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+const ERR_MISSING: &str = "path missing (ENOENT)";
+const ERR_ACCESS: &str = "permission denied (EACCES)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayInfo {
@@ -7,7 +11,7 @@ pub struct OverlayInfo {
     pub workdir: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MapEntry {
     pub first: u32,
     pub lower_first: u32,
@@ -131,14 +135,153 @@ pub fn format_inspect_text(r: &InspectResult) -> String {
             }
         }
         PathOutcome::Missing => {
-            push_line(&mut out, "error", "path missing (ENOENT)");
+            push_line(&mut out, "error", ERR_MISSING);
         }
         PathOutcome::AccessDenied => {
-            push_line(&mut out, "error", "permission denied (EACCES)");
+            push_line(&mut out, "error", ERR_ACCESS);
         }
     }
 
     out
+}
+
+pub fn format_inspect_json(r: &InspectResult) -> String {
+    serde_json::to_string_pretty(&inspect_json(r)).expect("inspect result is serializable")
+}
+
+#[derive(Serialize)]
+struct IdSet {
+    r: u32,
+    e: u32,
+    s: u32,
+    fs: u32,
+}
+
+#[derive(Serialize)]
+struct DevJson {
+    major: u32,
+    minor: u32,
+}
+
+#[derive(Serialize)]
+struct OwnerJson {
+    disk_uid: u32,
+    disk_gid: u32,
+    mapped_uid: Option<u32>,
+    mapped_gid: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct MountJson<'a> {
+    id: u32,
+    fstype: &'a str,
+    target: &'a str,
+    bind: &'a str,
+    flags: &'a str,
+}
+
+#[derive(Serialize)]
+struct OverlayJson<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lowerdir: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upperdir: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workdir: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct InspectJson<'a> {
+    pid: u32,
+    path: String,
+    root: String,
+    cwd: String,
+    ns_mnt: String,
+    ns_user: String,
+    uid: IdSet,
+    gid: IdSet,
+    uid_map: &'a [MapEntry],
+    gid_map: &'a [MapEntry],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inode: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev: Option<DevJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<OwnerJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount: Option<MountJson<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overlay: Option<OverlayJson<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
+
+fn inspect_json(r: &InspectResult) -> InspectJson<'_> {
+    let mut j = InspectJson {
+        pid: r.pid,
+        path: r.path.display().to_string(),
+        root: r.root.display().to_string(),
+        cwd: r.cwd.display().to_string(),
+        ns_mnt: r.ns_mnt.display().to_string(),
+        ns_user: r.ns_user.display().to_string(),
+        uid: id_set(r.uid),
+        gid: id_set(r.gid),
+        uid_map: &r.uid_map,
+        gid_map: &r.gid_map,
+        inode: None,
+        dev: None,
+        owner: None,
+        mount: None,
+        overlay: None,
+        error: None,
+        warnings: Vec::new(),
+    };
+
+    match &r.outcome {
+        PathOutcome::Resolved(p) => {
+            j.inode = Some(p.inode);
+            j.dev = Some(DevJson {
+                major: p.dev_major,
+                minor: p.dev_minor,
+            });
+            j.owner = Some(OwnerJson {
+                disk_uid: p.disk_uid,
+                disk_gid: p.disk_gid,
+                mapped_uid: p.mapped_uid,
+                mapped_gid: p.mapped_gid,
+            });
+            j.mount = Some(MountJson {
+                id: p.mount_id,
+                fstype: &p.mount_fstype,
+                target: &p.mount_target,
+                bind: &p.mount_bind,
+                flags: &p.mount_flags,
+            });
+            if let Some(ov) = &p.overlay {
+                j.overlay = Some(OverlayJson {
+                    lowerdir: ov.lowerdir.as_deref(),
+                    upperdir: ov.upperdir.as_deref(),
+                    workdir: ov.workdir.as_deref(),
+                });
+            }
+            j.warnings = path_warnings(&r.path, p);
+        }
+        PathOutcome::Missing => j.error = Some(ERR_MISSING),
+        PathOutcome::AccessDenied => j.error = Some(ERR_ACCESS),
+    }
+
+    j
+}
+
+fn id_set(ids: [u32; 4]) -> IdSet {
+    IdSet {
+        r: ids[0],
+        e: ids[1],
+        s: ids[2],
+        fs: ids[3],
+    }
 }
 
 pub fn path_warnings(path: &Path, p: &PathDetails) -> Vec<String> {
@@ -342,5 +485,69 @@ mod tests {
         p.overlay = None;
         let w = path_warnings(Path::new("/data/config"), &p);
         assert!(!w.iter().any(|m| m == "mount is read-only"));
+    }
+
+    fn parse_json(r: &InspectResult) -> serde_json::Value {
+        serde_json::from_str(&format_inspect_json(r)).unwrap()
+    }
+
+    #[test]
+    fn json_resolved_mirrors_inspect_fields() {
+        let v = parse_json(&sample());
+        assert_eq!(v["pid"], 4821);
+        assert_eq!(v["path"], "/data/config");
+        assert_eq!(v["root"], "/");
+        assert_eq!(v["ns_mnt"], "mnt:[4026532680]");
+        assert_eq!(v["uid"]["r"], 1000);
+        assert_eq!(v["uid_map"][0]["lower_first"], 100000);
+        assert_eq!(v["inode"], 88421);
+        assert_eq!(v["dev"]["major"], 0);
+        assert_eq!(v["dev"]["minor"], 92);
+        assert_eq!(v["owner"]["disk_uid"], 100000);
+        assert_eq!(v["owner"]["mapped_uid"], 0);
+        assert_eq!(v["mount"]["id"], 892);
+        assert_eq!(v["mount"]["fstype"], "overlay");
+        assert_eq!(v["mount"]["bind"], "/");
+        assert_eq!(v["overlay"]["lowerdir"], "/lower");
+        assert_eq!(v["overlay"]["upperdir"], "/upper");
+        assert_eq!(v["overlay"]["workdir"], "/work");
+        let warnings = v["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| w == "cannot prove overlay upper vs lower"));
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn json_missing_has_error_no_inode() {
+        let v = parse_json(&sample_context());
+        assert_eq!(v["pid"], 4821);
+        assert_eq!(v["path"], "/data/config");
+        assert_eq!(v["error"], ERR_MISSING);
+        assert!(v.get("inode").is_none());
+        assert!(v.get("mount").is_none());
+        assert!(v.get("warnings").is_none());
+    }
+
+    #[test]
+    fn json_access_denied() {
+        let mut r = sample_context();
+        r.outcome = PathOutcome::AccessDenied;
+        let v = parse_json(&r);
+        assert_eq!(v["error"], ERR_ACCESS);
+        assert!(v.get("inode").is_none());
+    }
+
+    #[test]
+    fn json_unmapped_uid_is_null() {
+        let mut r = sample();
+        if let PathOutcome::Resolved(p) = &mut r.outcome {
+            p.mapped_uid = None;
+            p.overlay = None;
+        }
+        let v = parse_json(&r);
+        assert!(v["owner"]["mapped_uid"].is_null());
+        assert_eq!(v["owner"]["mapped_gid"], 0);
+        let warnings = v["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| w == "disk uid is unmapped in this user namespace"));
+        assert!(v.get("overlay").is_none());
     }
 }
