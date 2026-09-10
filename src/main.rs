@@ -2,7 +2,7 @@ mod mountinfo;
 mod path_resolution;
 mod report;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use mountinfo::{find_mount, parse_mountinfo, parse_overlay_dirs};
 use path_resolution::{resolve_path, ResolveError};
 use report::{
@@ -35,6 +35,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// inspect the same path for two processes
+    Diff {
+        /// host process ids
+        #[arg(
+            short = 'p',
+            long = "pid",
+            value_name = "PID",
+            required = true,
+            action = ArgAction::Append
+        )]
+        pids: Vec<u32>,
+        /// path as seen by both processes
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,6 +66,12 @@ fn main() {
                 process::exit(1);
             }
         }
+        Commands::Diff { pids, path } => {
+            if let Err(msg) = run_diff(&pids, &path) {
+                eprintln!("psight: {msg}");
+                process::exit(1);
+            }
+        }
     }
 }
 
@@ -62,6 +82,21 @@ fn run_inspect(pid: u32, path: &Path, json: bool) -> Result<(), String> {
     } else {
         print!("{}", format_inspect_text(&result));
     }
+    Ok(())
+}
+
+fn run_diff(pids: &[u32], path: &Path) -> Result<(), String> {
+    let [first_pid, second_pid] = pids else {
+        return Err(format!(
+            "diff needs exactly two --pid values, got {}",
+            pids.len()
+        ));
+    };
+
+    let first = inspect(*first_pid, path)?;
+    let second = inspect(*second_pid, path)?;
+
+    print!("first:\n{}\nsecond:\n{}", format_inspect_text(&first), format_inspect_text(&second));
     Ok(())
 }
 
