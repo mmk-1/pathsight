@@ -96,8 +96,43 @@ fn run_diff(pids: &[u32], path: &Path) -> Result<(), String> {
     let first = inspect(*first_pid, path)?;
     let second = inspect(*second_pid, path)?;
 
-    print!("first:\n{}\nsecond:\n{}", format_inspect_text(&first), format_inspect_text(&second));
+    print!(
+        "first:\n{}\nsecond:\n{}{}",
+        format_inspect_text(&first),
+        format_inspect_text(&second),
+        format_diff_comparison(&first, &second)
+    );
     Ok(())
+}
+
+fn format_diff_comparison(first: &InspectResult, second: &InspectResult) -> String {
+    let (PathOutcome::Resolved(first), PathOutcome::Resolved(second)) =
+        (&first.outcome, &second.outcome)
+    else {
+        return "comparison unavailable: path did not resolve for both processes\n".into();
+    };
+
+    let mut out = String::new();
+
+    if first.inode != second.inode {
+        out.push_str(&format!(
+            "different inode: {} != {}\n",
+            first.inode, second.inode
+        ));
+    }
+
+    if (first.dev_major, first.dev_minor) != (second.dev_major, second.dev_minor) {
+        out.push_str(&format!(
+            "different device: {}:{} != {}:{}\n",
+            first.dev_major, first.dev_minor, second.dev_major, second.dev_minor
+        ));
+    }
+
+    if out.is_empty() {
+        out.push_str("inode and device match\n");
+    }
+
+    out
 }
 
 fn inspect(pid: u32, path: &Path) -> Result<InspectResult, String> {
